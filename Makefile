@@ -27,8 +27,8 @@ EXAMPLE_TARGETS := $(patsubst %,example-%,$(EXAMPLES))
 CMDS := $(patsubst ./cmd/%/,%,$(sort $(dir $(wildcard ./cmd/*/))))
 CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
-CHECK_TARGETS := lint
-MAKE_TARGETS := binaries build check fmt lint-internal test examples cmds coverage generate vendor check-vendor third-party-notices check-third-party-notices $(CHECK_TARGETS)
+CHECK_TARGETS := lint test-tools
+MAKE_TARGETS := binaries build check fmt lint-internal test examples cmds coverage generate vendor check-vendor third-party-notices check-third-party-notices third-party-notices-repos third-party-notices-urls go-licenses $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(EXAMPLE_TARGETS) $(CMD_TARGETS)
 
@@ -86,6 +86,10 @@ GO_LICENSES = $(CURDIR)/bin/go-licenses
 $(GO_LICENSES): deployments/devel/go.mod deployments/devel/go.sum
 	cd deployments/devel && GOBIN=$(CURDIR)/bin GOFLAGS=-mod=readonly go install github.com/google/go-licenses/v2
 
+# Stable name for the absolute-path binary rule above, so CI does not have to
+# spell $(CURDIR) to build just the tool.
+go-licenses: $(GO_LICENSES)
+
 third-party-notices: $(GO_LICENSES)
 	@bash hack/generate-third-party-notices.sh
 
@@ -97,6 +101,21 @@ check-third-party-notices: third-party-notices
 		|| { echo "ERROR: THIRD_PARTY_NOTICES.md is not tracked. Run 'make third-party-notices' and commit the result."; exit 1; }
 	@git diff --exit-code HEAD -- THIRD_PARTY_NOTICES.md \
 		|| { echo "ERROR: THIRD_PARTY_NOTICES.md is stale. Run 'make third-party-notices' and commit the change."; exit 1; }
+
+# Needs network. Rarely run: keyed by module, so a version bump does not
+# invalidate it. Only a new dependency does.
+third-party-notices-repos:
+	@bash hack/resolve-module-repos.sh
+
+# Needs network. Every URL is content-verified against the copy this repository
+# builds from, so re-run this whenever a dependency version changes.
+third-party-notices-urls: $(GO_LICENSES) third-party-notices-repos
+	@bash hack/verify-license-urls.sh
+
+test-tools:
+	@for t in hack/*_test.sh; do \
+		bash "$$t" || exit 1; \
+	done
 
 COVERAGE_FILE := coverage.out
 test: build cmds
