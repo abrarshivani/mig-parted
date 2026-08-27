@@ -83,10 +83,13 @@ check_prerequisites() {
     LOCAL_MODULE=$(go list -m 2>/dev/null || true)
     [[ -n "${LOCAL_MODULE}" ]] || die "could not determine local module path via 'go list -m'."
 
-    # CGO off lets go-licenses cross-list without a C toolchain; the reported
-    # import closure is unchanged.
+    # 'make cmds' leaves CGO_ENABLED at its default, and the released binaries
+    # record CGO_ENABLED=1: at 0 the build tags drop every file in
+    # go-nvml/pkg/dl on linux, so it falls out of the closure go-licenses
+    # reports and ships unattributed. go-licenses never compiles, so listing
+    # with cgo on needs no C toolchain.
     export GOFLAGS="-mod=vendor"
-    export CGO_ENABLED=0
+    export CGO_ENABLED=1
 
     # The bundled binary's dependencies are not vendored, so their license text
     # and the bytes each URL is verified against come from the module cache

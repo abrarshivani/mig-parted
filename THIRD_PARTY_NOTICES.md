@@ -26,7 +26,7 @@ compiled busybox binary is added to the image, which is licensed under GPLv2.
 | Package | Version | License | Location |
 |---------|---------|---------|----------|
 | `github.com/NVIDIA/go-nvlib/pkg` | v0.12.0 | Apache-2.0 | [LICENSE](https://github.com/NVIDIA/go-nvlib/blob/v0.12.0/LICENSE) / [NOTICE](https://github.com/NVIDIA/go-nvlib/blob/v0.12.0/NOTICE) |
-| `github.com/NVIDIA/go-nvml/pkg/nvml` | v0.13.3-1 | Apache-2.0 | [LICENSE](https://github.com/NVIDIA/go-nvml/blob/v0.13.3-1/LICENSE) |
+| `github.com/NVIDIA/go-nvml/pkg` | v0.13.3-1 | Apache-2.0 | [LICENSE](https://github.com/NVIDIA/go-nvml/blob/v0.13.3-1/LICENSE) |
 | `github.com/coreos/go-systemd/v22/dbus` | v22.7.0 | Apache-2.0 | [LICENSE](https://github.com/coreos/go-systemd/blob/v22.7.0/LICENSE) / [NOTICE](https://github.com/coreos/go-systemd/blob/v22.7.0/NOTICE) |
 | `github.com/davecgh/go-spew/spew` | v1.1.2-0.20180830191138-d8f796af33cc | ISC | [LICENSE](https://github.com/davecgh/go-spew/blob/d8f796af33cc/LICENSE) |
 | `github.com/emicklei/go-restful/v3` | v3.13.0 | MIT | [LICENSE](https://github.com/emicklei/go-restful/blob/v3.13.0/LICENSE) |
@@ -338,7 +338,7 @@ the PCI ID Project at https://pci-ids.ucw.cz/.
 ```
 
 
-### github.com/NVIDIA/go-nvml/pkg/nvml
+### github.com/NVIDIA/go-nvml/pkg
 
 * Version: v0.13.3-1
 * License: Apache-2.0
