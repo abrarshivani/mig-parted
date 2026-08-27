@@ -80,7 +80,7 @@ compiled busybox binary is added to the image, which is licensed under GPLv2.
 | `google.golang.org/protobuf` | v1.36.12-0.20260120151049-f2248ac996af | BSD-3-Clause | [LICENSE](https://go.googlesource.com/protobuf/+/f2248ac996af/LICENSE) / [PATENTS](https://go.googlesource.com/protobuf/+/f2248ac996af/PATENTS) |
 | `gopkg.in/evanphx/json-patch.v4` | v4.13.0 | BSD-3-Clause | [LICENSE](https://github.com/evanphx/json-patch/blob/v4.13.0/LICENSE) |
 | `gopkg.in/inf.v0` | v0.9.1 | BSD-3-Clause | [LICENSE](https://github.com/go-inf/inf/blob/v0.9.1/LICENSE) |
-| `gopkg.in/yaml.v2` | v2.4.0 | Apache-2.0 | [LICENSE](https://github.com/go-yaml/yaml/blob/v2.4.0/LICENSE) / [LICENSE.libyaml](https://github.com/go-yaml/yaml/blob/v2.4.0/LICENSE.libyaml) / [NOTICE](https://github.com/go-yaml/yaml/blob/v2.4.0/NOTICE) |
+| `gopkg.in/yaml.v2` | v2.4.0 | Apache-2.0 / MIT | [LICENSE](https://github.com/go-yaml/yaml/blob/v2.4.0/LICENSE) / [LICENSE.libyaml](https://github.com/go-yaml/yaml/blob/v2.4.0/LICENSE.libyaml) / [NOTICE](https://github.com/go-yaml/yaml/blob/v2.4.0/NOTICE) |
 | `gopkg.in/yaml.v3` | v3.0.1 | Apache-2.0 / MIT | [LICENSE](https://github.com/go-yaml/yaml/blob/v3.0.1/LICENSE) / [NOTICE](https://github.com/go-yaml/yaml/blob/v3.0.1/NOTICE) |
 | `k8s.io/api` | v0.36.4 | Apache-2.0 | [LICENSE](https://github.com/kubernetes/api/blob/v0.36.4/LICENSE) |
 | `k8s.io/apimachinery/pkg` | v0.36.4 | Apache-2.0 | [LICENSE](https://github.com/kubernetes/apimachinery/blob/v0.36.4/LICENSE) |
@@ -6848,7 +6848,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ### gopkg.in/yaml.v2
 
 * Version: v2.4.0
-* License: Apache-2.0
+* License: Apache-2.0 / MIT
 
 #### LICENSE
 
