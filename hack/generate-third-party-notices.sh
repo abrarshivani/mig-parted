@@ -130,6 +130,7 @@ prepare_workspace() {
     INDEX_FILE="$(mktemp "${t}-idx.XXXXXX")"
     TOOLS_CSV="$(mktemp "${t}-tools-csv.XXXXXX")"
     TOOLS_INDEX="$(mktemp "${t}-tools-idx.XXXXXX")"
+    MERGED_INDEX="$(mktemp "${t}-merged-idx.XXXXXX")"
     TOOLS_MODULES="$(mktemp "${t}-tools-modules.XXXXXX")"
 
     # Next to the destination, not under TMPDIR: the final mv must not cross
@@ -138,7 +139,7 @@ prepare_workspace() {
     out_dir="$(dirname "${OUTPUT}")"
     mkdir -p "${out_dir}"
     OUT_TMP="$(mktemp "${out_dir}/.$(basename "${OUTPUT}").XXXXXX")"
-    trap 'rm -rf "${SAVE_ROOT}"; rm -f "${COMBINED_CSV}" "${INDEX_FILE}" "${TOOLS_CSV}" "${TOOLS_INDEX}" "${TOOLS_MODULES}" "${OUT_TMP}"' EXIT INT TERM
+    trap 'rm -rf "${SAVE_ROOT}"; rm -f "${COMBINED_CSV}" "${INDEX_FILE}" "${TOOLS_CSV}" "${TOOLS_INDEX}" "${MERGED_INDEX}" "${TOOLS_MODULES}" "${OUT_TMP}"' EXIT INT TERM
 }
 
 collect_runtime() {
@@ -346,9 +347,21 @@ build_indexes() {
         die "could not resolve a version for some bundled-binary packages from ${TOOLS_DIR}/go.mod."
     fi
 
-    # Both indexes at once: a row valid only for the bundled binary must not
-    # look stale merely because the runtime set does not ship that package.
-    check_override_coverage "${INDEX_FILE}" "${TOOLS_INDEX}"
+    merge_indexes "${INDEX_FILE}" "${TOOLS_INDEX}" > "${MERGED_INDEX}"
+
+    check_override_coverage "${MERGED_INDEX}"
+}
+
+# One index for the whole image. The two trees are a build-time detail: what
+# ships is one filesystem, so a module present in both at different versions is
+# two honest rows rather than a second table the reader has to reconcile. The
+# source tree moves into the row as a sixth field, since it is now per row
+# rather than per table. Same package at the same version is one row; the bytes
+# are identical, so the vendored copy wins.
+merge_indexes() {
+    cat <(sed 's/$/,vendor/' "$1") <(sed 's/$/,modcache/' "$2") \
+        | LC_ALL=C awk -F, '!seen[$1 FS $5]++' \
+        | LC_ALL=C sort -t, -k1,1 -k5,5
 }
 
 # A dropped dependency would otherwise leave its row in LICENSE_OVERRIDES
@@ -475,12 +488,12 @@ location_cell() {
 }
 
 emit_index_table() {
-    local index="$1" source_kind="$2"
-    local package _ license module version location license_identifier module_dir
+    local index="$1"
+    local package _ license module version source_kind location license_identifier module_dir
     printf '| Package | Version | License | Location |\n'
     printf '|---------|---------|---------|----------|\n'
 
-    while IFS=, read -r package _ license module version; do
+    while IFS=, read -r package _ license module version source_kind; do
         [[ -z "${package}" ]] && continue
         module_dir="$(module_source_dir "${module}" "${version}" "${source_kind}")"
         location="$(location_cell "${package}" "${module}" "${version}" "${module_dir}")"
@@ -492,11 +505,11 @@ emit_index_table() {
 }
 
 emit_sections() {
-    local index="$1" source_kind="$2"
-    local package _ license module version files license_file fence
+    local index="$1"
+    local package _ license module version source_kind files license_file fence
     local relative_license_dir license_file_name url governing_dir license_identifier module_dir
 
-    while IFS=, read -r package _ license module version; do
+    while IFS=, read -r package _ license module version source_kind; do
         [[ -z "${package}" ]] && continue
 
         license_identifier="$(license_identifier_for "${package}" "${license:-Unknown}")"
@@ -552,8 +565,11 @@ covers all **Go modules** statically linked into the commands under `cmd/`. The
 `nvidia-mig-parted` and `nvidia-mig-manager` commands ship in the
 `k8s-mig-manager` image, and `nvidia-mig-parted` also ships in the deb, rpm and
 tarball packages. The image additionally bundles `nvidia-ctk`, built from the
-version pinned in `deployments/devel/go.mod`. Go standard library packages are
-excluded; they are covered by the license of the Go distribution itself.
+version pinned in `deployments/devel/go.mod`, and its dependencies are listed
+here too. Where `nvidia-ctk` and the commands built here link the same module at
+different versions, both copies ship and both are listed. Go standard library
+packages are excluded; they are covered by the license of the Go distribution
+itself.
 
 Each dependency is listed with the version redistributed and a link to the
 license file in that version's upstream source. Every link was verified by
@@ -565,30 +581,17 @@ All of the OSS packages and source included in this image can be found at
 <https://developer.nvidia.com/w/distroless-oss/index.html>. A statically
 compiled busybox binary is added to the image, which is licensed under GPLv2.
 
-## Runtime Dependency Index
+## Dependency Index
 
 EOF
-        emit_index_table "${INDEX_FILE}" vendor
+        emit_index_table "${MERGED_INDEX}"
 
         cat <<'EOF'
 
-## Bundled Binary Dependency Index
+## License Texts
 
 EOF
-        emit_index_table "${TOOLS_INDEX}" modcache
-
-        cat <<'EOF'
-
-## Runtime Dependency License Texts
-
-EOF
-        emit_sections "${INDEX_FILE}" vendor
-
-        cat <<'EOF'
-## Bundled Binary License Texts
-
-EOF
-        emit_sections "${TOOLS_INDEX}" modcache
+        emit_sections "${MERGED_INDEX}"
     } > "${OUT_TMP}"
     # mktemp creates 0600; set the mode before, never after, the rename.
     chmod 644 "${OUT_TMP}"
@@ -607,10 +610,9 @@ main() {
     build_indexes
     compose_document
 
-    local runtime_count bundled_count
-    runtime_count=$(wc -l < "${INDEX_FILE}" | tr -d ' ')
-    bundled_count=$(wc -l < "${TOOLS_INDEX}" | tr -d ' ')
-    log "Wrote ${OUTPUT} (${runtime_count} runtime rows, ${bundled_count} bundled binary rows)"
+    local count
+    count=$(wc -l < "${MERGED_INDEX}" | tr -d ' ')
+    log "Wrote ${OUTPUT} (${count} entries)"
 }
 
 # Sourced by the tests and by hack/verify-license-urls.sh, which reuse these

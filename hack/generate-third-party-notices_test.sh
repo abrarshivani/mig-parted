@@ -140,36 +140,36 @@ render="$(mktemp -d)"
 mkdir -p "${render}/cache/k8s.io/apimachinery/third_party/forked/golang"
 printf 'BSD text\n' > "${render}/cache/k8s.io/apimachinery/third_party/forked/golang/LICENSE"
 cat > "${render}/index.csv" <<'IDX'
-k8s.io/apimachinery/third_party/forked/golang,ignored,BSD-3-Clause,k8s.io/apimachinery,v0.36.4
-go.yaml.in/yaml/v2,ignored,Apache-2.0,go.yaml.in/yaml/v2,v2.4.3
+k8s.io/apimachinery/third_party/forked/golang,ignored,BSD-3-Clause,k8s.io/apimachinery,v0.36.4,vendor
+go.yaml.in/yaml/v2,ignored,Apache-2.0,go.yaml.in/yaml/v2,v2.4.3,vendor
 IDX
 
 assert_eq '| Package | Version | License | Location |' \
     "$(LICENSE_URLS="${urls_fixture}" VENDOR_DIR="${vendor_fixture}" LICENSES_DIR="${render}/cache" \
-       LICENSE_OVERRIDES="${empty_overrides_fixture}" emit_index_table "${render}/index.csv" vendor | sed -n 1p)" \
+       LICENSE_OVERRIDES="${empty_overrides_fixture}" emit_index_table "${render}/index.csv" | sed -n 1p)" \
     "index header has four columns"
 # Expected literal Markdown, not shell expansion.
 # shellcheck disable=SC2016
 assert_eq '| `k8s.io/apimachinery/third_party/forked/golang` | v0.36.4 | BSD-3-Clause | [LICENSE](https://example.invalid/forked-golang) |' \
     "$(LICENSE_URLS="${urls_fixture}" VENDOR_DIR="${vendor_fixture}" LICENSES_DIR="${render}/cache" \
-       LICENSE_OVERRIDES="${empty_overrides_fixture}" emit_index_table "${render}/index.csv" vendor | sed -n 3p)" \
+       LICENSE_OVERRIDES="${empty_overrides_fixture}" emit_index_table "${render}/index.csv" | sed -n 3p)" \
     "index row labels the link by filename"
 
 # Regression: a package whose module/version pair has no entry in the URL map
 # must abort the whole table, not render with a blank Location cell.
 mismatch_index="${render}/mismatch-index.csv"
 cat > "${mismatch_index}" <<'IDX'
-k8s.io/apimachinery/third_party/forked/golang,ignored,BSD-3-Clause,k8s.io/apimachinery,v9.9.9
+k8s.io/apimachinery/third_party/forked/golang,ignored,BSD-3-Clause,k8s.io/apimachinery,v9.9.9,vendor
 IDX
 # $1/$2 are expanded by the child bash -c, not here.
 # shellcheck disable=SC2016
 assert_fails "emit_index_table fails closed when the URL map has no entry for a row" \
     env LICENSE_URLS="${urls_fixture}" VENDOR_DIR="${vendor_fixture}" LICENSES_DIR="${render}/cache" \
     LICENSE_OVERRIDES="${empty_overrides_fixture}" \
-    bash -c 'source "$1"; emit_index_table "$2" vendor' _ "${HERE}/generate-third-party-notices.sh" "${mismatch_index}"
+    bash -c 'source "$1"; emit_index_table "$2"' _ "${HERE}/generate-third-party-notices.sh" "${mismatch_index}"
 
 section="$(LICENSE_URLS="${urls_fixture}" VENDOR_DIR="${vendor_fixture}" LICENSES_DIR="${render}/cache" \
-    LICENSE_OVERRIDES="${empty_overrides_fixture}" emit_sections "${render}/index.csv" vendor)"
+    LICENSE_OVERRIDES="${empty_overrides_fixture}" emit_sections "${render}/index.csv")"
 assert_eq "* Version: v0.36.4" "$(printf '%s' "${section}" | sed -n 3p)" "section names the version"
 assert_eq "* License: BSD-3-Clause" "$(printf '%s' "${section}" | sed -n 4p)" "section names the license"
 assert_eq "0" "$(printf '%s' "${section}" | LC_ALL=C grep -c '^\* Module: ')" "section no longer names the module"
@@ -194,17 +194,44 @@ assert_eq "BSD-3-Clause" \
 # shellcheck disable=SC2016
 assert_eq '| `go.yaml.in/yaml/v2` | v2.4.3 | Apache-2.0 / MIT | [LICENSE](https://example.invalid/yaml-v2) / [LICENSE.libyaml](https://example.invalid/yaml-v2-libyaml) |' \
     "$(LICENSE_URLS="${urls_fixture}" VENDOR_DIR="${vendor_fixture}" LICENSES_DIR="${render}/cache" \
-       LICENSE_OVERRIDES="${overrides_fixture}" emit_index_table "${render}/index.csv" vendor | sed -n 4p)" \
+       LICENSE_OVERRIDES="${overrides_fixture}" emit_index_table "${render}/index.csv" | sed -n 4p)" \
     "emit_index_table renders the overridden identifier in the License column"
 
-bundled_only_index="${render}/bundled-index.csv"
+# merge_indexes: the two trees become one table, and the source tree each row
+# was hashed against moves into the row.
+runtime_fixture="${render}/runtime.csv"
+bundled_fixture="${render}/bundled.csv"
+cat > "${runtime_fixture}" <<'IDX'
+github.com/sirupsen/logrus,ignored,MIT,github.com/sirupsen/logrus,v1.10.1
+sigs.k8s.io/yaml,ignored,MIT,sigs.k8s.io/yaml,v1.6.0
+IDX
+cat > "${bundled_fixture}" <<'IDX'
+github.com/sirupsen/logrus,ignored,MIT,github.com/sirupsen/logrus,v1.9.4
+sigs.k8s.io/yaml,ignored,MIT,sigs.k8s.io/yaml,v1.6.0
+IDX
+
+assert_eq "3" \
+    "$(merge_indexes "${runtime_fixture}" "${bundled_fixture}" | wc -l | tr -d ' ')" \
+    "merge_indexes keeps both versions of a package but collapses an identical pair"
+
+assert_eq "github.com/sirupsen/logrus,ignored,MIT,github.com/sirupsen/logrus,v1.10.1,vendor
+github.com/sirupsen/logrus,ignored,MIT,github.com/sirupsen/logrus,v1.9.4,modcache
+sigs.k8s.io/yaml,ignored,MIT,sigs.k8s.io/yaml,v1.6.0,vendor" \
+    "$(merge_indexes "${runtime_fixture}" "${bundled_fixture}")" \
+    "merge_indexes tags each row with its source tree, sorts, and prefers the vendored copy"
+
+# A row valid only for the bundled binary must not look stale merely because
+# the runtime set does not ship that package.
+bundled_only_index="${render}/bundled-only.csv"
 cat > "${bundled_only_index}" <<'IDX'
 gopkg.in/yaml.v3,ignored,MIT,gopkg.in/yaml.v3,v3.0.1
 IDX
+merged_fixture="${render}/merged.csv"
+merge_indexes "${render}/index.csv" "${bundled_only_index}" > "${merged_fixture}"
 assert_eq "covered" \
     "$(LICENSE_OVERRIDES="${overrides_fixture}" check_override_coverage \
-        "${render}/index.csv" "${bundled_only_index}" && echo covered)" \
-    "check_override_coverage accepts a row matched only by the second index"
+        "${merged_fixture}" && echo covered)" \
+    "check_override_coverage accepts a row matched only by a bundled-binary entry"
 
 stale_overrides="$(mktemp)"
 printf 'github.com/absent/package\tApache-2.0 / MIT\ttest fixture\n' > "${stale_overrides}"

@@ -105,14 +105,14 @@ print(origin.get("Hash", ""))
 ' 2>/dev/null || printf '\n\n'
 }
 
-# One pass over an index. source_kind picks the local module tree the bytes
-# are hashed against: the runtime set is vendored, the bundled binary's
+# One pass over the index. Each row carries the module tree its bytes are
+# hashed against: the runtime set is vendored, the bundled binary's
 # dependencies are only in the module cache.
 verify_index() {
-    local index="$1" source_kind="$2"
-    local package _ module version repo subdir relative module_dir
+    local index="$1"
+    local package _ module version source_kind repo subdir relative module_dir
     local origin_tag origin_hash plain_version pseudo_version_hash_value license_file name path_in_module want_sha found_url
-    while IFS=, read -r package _ _ module version; do
+    while IFS=, read -r package _ _ module version source_kind; do
         [[ -z "${package}" ]] && continue
 
         module_dir="$(module_source_dir "${module}" "${version}" "${source_kind}")"
@@ -227,8 +227,7 @@ main() {
     # Exactly the two passes the generator emits: everything the document links
     # has to be verified, from the same tree the generator reads it from.
 
-    verify_index "${INDEX_FILE}" vendor
-    verify_index "${TOOLS_INDEX}" modcache
+    verify_index "${MERGED_INDEX}"
 
     (( FAILURES == 0 )) || die \
         "${FAILURES} license file(s) could not be matched to a verified upstream URL." \
