@@ -15,12 +15,19 @@
 
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=hack/license-url-lib.sh disable=SC1091
+source "${HERE}/license-url-lib.sh"
+
 OUTPUT="${OUTPUT:-THIRD_PARTY_NOTICES.md}"
 LICENSES_DIR="${LICENSES_DIR:-.licenses-cache}"
 TOOLS_DIR="${TOOLS_DIR:-deployments/devel}"
 TOOLS_FILE="${TOOLS_DIR}/tools.go"
 MULTI_ARCH_MK="${MULTI_ARCH_MK:-deployments/container/multi-arch.mk}"
 MODULES_TXT="${MODULES_TXT:-vendor/modules.txt}"
+LICENSE_URLS="${LICENSE_URLS:-hack/license-urls.tsv}"
+LICENSE_OVERRIDES="${LICENSE_OVERRIDES:-hack/license-overrides.tsv}"
+VENDOR_DIR="${VENDOR_DIR:-vendor}"
 
 PACKAGES=("./cmd/...")
 
@@ -45,14 +52,14 @@ log() {
 # Licenses that are themselves Markdown close a fixed ``` fence early and invert
 # every block after it, so open with one backtick more than the file's longest run.
 fence_for() {
-    local file="$1" longest width
+    local file="$1" longest_backtick_run fence_width
     # -a: a license containing a NUL byte is otherwise reported as "Binary file
     # ... matches" — on stdout or stderr by grep version, so the width varies by host.
-    longest=$(LC_ALL=C grep -oaE '`+' "${file}" 2>/dev/null \
-        | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }')
-    width=$(( longest + 1 ))
-    (( width < 3 )) && width=3
-    printf '%*s' "${width}" '' | tr ' ' '`'
+    longest_backtick_run=$(LC_ALL=C grep -oaE '`+' "${file}" 2>/dev/null \
+        | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }' || true)
+    fence_width=$(( longest_backtick_run + 1 ))
+    (( fence_width < 3 )) && fence_width=3
+    printf '%*s' "${fence_width}" '' | tr ' ' '`'
 }
 
 check_prerequisites() {
@@ -67,9 +74,10 @@ check_prerequisites() {
         die "go-licenses is not installed." "Install it with 'make third-party-notices'."
     fi
 
-    local f
-    for f in "${TOOLS_FILE}" "${MULTI_ARCH_MK}" "${MODULES_TXT}"; do
-        [[ -f "${f}" ]] || die "${f} not found — run 'make third-party-notices' from the repo root."
+    local required_file
+    for required_file in "${TOOLS_FILE}" "${MULTI_ARCH_MK}" "${MODULES_TXT}" "${LICENSE_OVERRIDES}"; do
+        [[ -f "${required_file}" ]] \
+            || die "${required_file} not found — run 'make third-party-notices' from the repo root."
     done
 
     LOCAL_MODULE=$(go list -m 2>/dev/null || true)
@@ -79,6 +87,12 @@ check_prerequisites() {
     # import closure is unchanged.
     export GOFLAGS="-mod=vendor"
     export CGO_ENABLED=0
+
+    # The bundled binary's dependencies are not vendored, so their license text
+    # and the bytes each URL is verified against come from the module cache
+    # that collect_bundled's 'go mod download' populates.
+    GOMODCACHE="$(go env GOMODCACHE)"
+    [[ -n "${GOMODCACHE}" ]] || die "could not determine the module cache via 'go env GOMODCACHE'."
 }
 
 verify_platform_matrix() {
@@ -158,9 +172,10 @@ collect_bundled() {
     (
         cd "${TOOLS_DIR}"
         GOFLAGS="-mod=readonly" go mod download
-        # Use paths, not versions: go-licenses resolves source URLs through
-        # remote repository metadata, whose tag choice can change over time.
-        GOFLAGS="-mod=readonly" go list -m -f '# {{.Path}}' all
+        # Same shape as vendor/modules.txt so annotate_modules reads both.
+        # The version is load-bearing now: it names the module cache directory
+        # the license text is read from, and pins the verified upstream URL.
+        GOFLAGS="-mod=readonly" go list -m -f '# {{.Path}} {{.Version}}' all
     ) > "${TOOLS_MODULES}"
 
     for platform in "${PLATFORMS[@]}"; do
@@ -244,7 +259,8 @@ collapse_index() {
 }
 
 # In vendor mode go-licenses reports a URL into this repo at HEAD, which stops
-# describing released content once main moves; module path is immutable.
+# describing released content once main moves and names our copy, not upstream.
+# The verified upstream location comes from hack/license-urls.tsv instead.
 annotate_modules() {
     local modfile="${1:-${MODULES_TXT}}"
     awk -v modfile="${modfile}" '
@@ -264,9 +280,11 @@ annotate_modules() {
                     }
                     mods[++m] = f[2]
                     disp[f[2]] = f[r]
+                    ver[f[2]] = f[r + 1]
                 } else {
                     mods[++m] = f[2]
                     disp[f[2]] = f[2]
+                    ver[f[2]] = f[3]
                 }
             }
             close(modfile)
@@ -282,7 +300,7 @@ annotate_modules() {
                 mp = mods[i]
                 if (($1 == mp || index($1, mp "/") == 1) && length(mp) > length(best)) best = mp
             }
-            print $0, (best == "" ? "unknown" : disp[best])
+            print $0, (best == "" ? "unknown" : disp[best]), (best == "" ? "unknown" : ver[best])
         }
     '
 }
@@ -315,73 +333,199 @@ build_indexes() {
     if cut -d, -f4 "${TOOLS_INDEX}" | LC_ALL=C grep -qx 'unknown'; then
         die "could not resolve a module for some bundled-binary packages from ${TOOLS_DIR}/go.mod."
     fi
+
+    if cut -d, -f5 "${INDEX_FILE}" | LC_ALL=C grep -qx 'unknown'; then
+        die "could not resolve a version for some runtime packages from ${MODULES_TXT}." \
+            "Run 'make vendor' and re-run, rather than committing a file with unattributed entries."
+    fi
+
+    if cut -d, -f5 "${TOOLS_INDEX}" | LC_ALL=C grep -qx 'unknown'; then
+        die "could not resolve a version for some bundled-binary packages from ${TOOLS_DIR}/go.mod."
+    fi
+
+    # Both indexes at once: a row valid only for the bundled binary must not
+    # look stale merely because the runtime set does not ship that package.
+    check_override_coverage "${INDEX_FILE}" "${TOOLS_INDEX}"
+}
+
+# A dropped dependency would otherwise leave its row in LICENSE_OVERRIDES
+# silently asserting a license for a package no longer shipped.
+check_override_coverage() {
+    local override_package
+    while IFS=$'\t' read -r override_package _ _; do
+        case "${override_package}" in
+            ''|'#'*) continue ;;
+        esac
+        LC_ALL=C cut -d, -f1 "$@" | LC_ALL=C grep -qFx "${override_package}" \
+            || die "${LICENSE_OVERRIDES} has a row for ${override_package}, which is not in either generated index." \
+                   "Remove that row from ${LICENSE_OVERRIDES} — the dependency was likely dropped."
+    done < "${LICENSE_OVERRIDES}"
 }
 
 # Filter by name: for restricted licenses 'go-licenses save' copies the whole
 # module source, which does not belong here.
 license_files_for() {
-    local dir="$1" f
-    [[ -d "${dir}" ]] || return 0
-    while IFS= read -r -d '' f; do
+    local search_dir="$1" license_file file_basename
+    [[ -d "${search_dir}" ]] || return 0
+    while IFS= read -r -d '' license_file; do
+        file_basename="$(basename "${license_file}")"
+        # Exclude source files: the name pattern below also matches sources that
+        # merely start with a license-shaped header, e.g. a licence.go beginning
+        # "// Copyright ...". Reading module trees rather than the go-licenses
+        # save output makes those reachable.
+        case "${file_basename}" in
+            *.go|*.c|*.h|*.s|*.py|*.sh|*.java|*.ts|*.js) continue ;;
+        esac
         # LC_ALL=C: under a Turkish locale glibc does not fold I to i, so this
         # stops matching LICENSE and every section renders as unavailable.
-        if printf '%s' "$(basename "${f}")" \
+        if printf '%s' "${file_basename}" \
             | LC_ALL=C grep -qiE '^(licen[cs]e|notice|copying|copyright|authors|patents)([-._].*)?$'; then
-            printf '%s\n' "${f}"
+            printf '%s\n' "${license_file}"
         fi
-    done < <(find "${dir}" -maxdepth 1 -type f -print0 2>/dev/null | LC_ALL=C sort -z)
+    done < <(find "${search_dir}" -maxdepth 1 -type f -print0 2>/dev/null | LC_ALL=C sort -z)
+}
+
+# Separate from check_prerequisites: hack/verify-license-urls.sh reuses the
+# collection stages to discover which license files the document will link, and
+# it is the command that produces this map, so it must run without it.
+require_url_map() {
+    [[ -f "${LICENSE_URLS}" ]] \
+        || die "${LICENSE_URLS} not found." \
+               "Run 'make third-party-notices-urls' (needs network) and commit the result."
+}
+
+# A single license file can bundle more than one license, which go-licenses
+# reports as whichever one it scores highest; LICENSE_OVERRIDES corrects the
+# identifier by hand without touching the license text, which is unaffected.
+license_identifier_for() {
+    local package="$1" default_identifier="$2" override_identifier
+    override_identifier="$(LC_ALL=C awk -F'\t' -v pkg="${package}" \
+        '$1 == pkg { print $2; exit }' "${LICENSE_OVERRIDES}")"
+    printf '%s' "${override_identifier:-${default_identifier}}"
+}
+
+# Where the module's own source tree is on disk. The runtime set is vendored;
+# the bundled binary's dependencies are not, so they are read from the module
+# cache instead. Both are the real upstream layout, which is what lets a license
+# file be located within its module and hashed against the URL that serves it.
+module_source_dir() {
+    local module="$1" version="$2" source_kind="$3"
+    case "${source_kind}" in
+        vendor)
+            printf '%s' "${VENDOR_DIR}/${module}"
+            ;;
+        modcache)
+            # The cache escapes capitals exactly as the module proxy does.
+            printf '%s/%s@%s' "${GOMODCACHE}" "$(proxy_escape "${module}")" "${version}"
+            ;;
+        *)
+            die "unknown module source kind '${source_kind}' for ${module}."
+            ;;
+    esac
+}
+
+# The first enclosing directory holding a license file wins, which is how
+# go-licenses attributes them. Prints the directory relative to the module root.
+license_dir_within_module() {
+    local package="$1" module="$2" module_dir="$3"
+    local dir="${package}" relative
+    while :; do
+        relative="${dir#"${module}"}"
+        relative="${relative#/}"
+        if [[ -n "$(license_files_for "${module_dir}${relative:+/${relative}}")" ]]; then
+            printf '%s' "${relative}"
+            return 0
+        fi
+        [[ "${dir}" == "${module}" ]] && return 1
+        [[ "${dir}" != */* ]] && return 1
+        dir="${dir%/*}"
+    done
+}
+
+location_for() {
+    local url
+    url="$(LC_ALL=C awk -F'\t' -v m="$1" -v v="$2" -v p="$3" \
+        '$1 == m && $2 == v && $3 == p { print $4; found = 1; exit }
+         END { exit !found }' "${LICENSE_URLS}")" || return 1
+    [[ -n "${url}" ]] || return 1
+    printf '%s' "${url}"
+}
+
+# Mirrors how the License column joins identifiers.
+location_cell() {
+    local package="$1" module="$2" version="$3" module_dir="$4"
+    local relative_license_dir license_file_name license_path url cell="" license_file governing_dir
+    relative_license_dir="$(license_dir_within_module "${package}" "${module}" "${module_dir}")" \
+        || die "no license file found for ${package} under ${module_dir}."
+    governing_dir="${module_dir}${relative_license_dir:+/${relative_license_dir}}"
+    while IFS= read -r license_file; do
+        [[ -z "${license_file}" ]] && continue
+        license_file_name="$(basename "${license_file}")"
+        license_path="${relative_license_dir:+${relative_license_dir}/}${license_file_name}"
+        url="$(location_for "${module}" "${version}" "${license_path}")" \
+            || die "${LICENSE_URLS} has no verified URL for ${module}@${version} ${license_path}." \
+                   "Run 'make third-party-notices-urls' (needs network) and commit the result."
+        cell="${cell:+${cell} / }[${license_file_name}](${url})"
+    done < <(license_files_for "${governing_dir}")
+    [[ -n "${cell}" ]] || die "no license file for ${package} under ${governing_dir}."
+    printf '%s' "${cell}"
 }
 
 emit_index_table() {
-    local index="$1" provenance="$2" pkg url license module
-    if [[ "${provenance}" == "module" ]]; then
-        printf '| Package | License | Dependency |\n'
-    else
-        printf '| Package | License | Source |\n'
-    fi
-    printf '|---------|---------|--------|\n'
+    local index="$1" source_kind="$2"
+    local package _ license module version location license_identifier module_dir
+    printf '| Package | Version | License | Location |\n'
+    printf '|---------|---------|---------|----------|\n'
 
-    while IFS=, read -r pkg url license module; do
-        [[ -z "${pkg}" ]] && continue
+    while IFS=, read -r package _ license module version; do
+        [[ -z "${package}" ]] && continue
+        module_dir="$(module_source_dir "${module}" "${version}" "${source_kind}")"
+        location="$(location_cell "${package}" "${module}" "${version}" "${module_dir}")"
+        license_identifier="$(license_identifier_for "${package}" "${license:-Unknown}")"
         # shellcheck disable=SC2016  # backticks are literal markdown here.
-        if [[ "${provenance}" == "module" ]]; then
-            printf '| `%s` | %s | `%s` |\n' "${pkg}" "${license:-Unknown}" "${module:-unknown}"
-        else
-            printf '| `%s` | %s | %s |\n' "${pkg}" "${license:-Unknown}" "${url:-n/a}"
-        fi
+        printf '| `%s` | %s | %s | %s |\n' \
+            "${package}" "${version:-unknown}" "${license_identifier}" "${location}"
     done < "${index}"
 }
 
 emit_sections() {
-    local index="$1" root="$2" provenance="$3"
-    local pkg url license module files lf fence
+    local index="$1" source_kind="$2"
+    local package _ license module version files license_file fence
+    local relative_license_dir license_file_name url governing_dir license_identifier module_dir
 
-    while IFS=, read -r pkg url license module; do
-        [[ -z "${pkg}" ]] && continue
+    while IFS=, read -r package _ license module version; do
+        [[ -z "${package}" ]] && continue
 
-        printf '### %s\n\n' "${pkg}"
-        printf '* License: %s\n' "${license:-Unknown}"
-        if [[ "${provenance}" == "module" ]]; then
-            printf '* Dependency: %s\n\n' "${module:-unknown}"
-        else
-            printf '* Source: %s\n\n' "${url:-n/a}"
-        fi
+        license_identifier="$(license_identifier_for "${package}" "${license:-Unknown}")"
+        printf '### %s\n\n' "${package}"
+        printf '* Version: %s\n' "${version:-unknown}"
+        printf '* License: %s\n\n' "${license_identifier}"
+
+        module_dir="$(module_source_dir "${module}" "${version}" "${source_kind}")"
+        relative_license_dir="$(license_dir_within_module "${package}" "${module}" "${module_dir}")" \
+            || die "no license file found for ${package} under ${module_dir}."
+        governing_dir="${module_dir}${relative_license_dir:+/${relative_license_dir}}"
 
         files=()
-        while IFS= read -r lf; do
-            [[ -n "${lf}" ]] && files+=("${lf}")
-        done < <(license_files_for "${root}/${pkg}")
+        while IFS= read -r license_file; do
+            [[ -n "${license_file}" ]] && files+=("${license_file}")
+        done < <(license_files_for "${governing_dir}")
 
-        # An entry with no saved text attributes nothing, so fail rather than
+        # An entry with no license text attributes nothing, so fail rather than
         # emit a placeholder that the check would then accept forever.
-        (( ${#files[@]} > 0 )) || die "no license text was saved for ${pkg}." \
-            "go-licenses classified it but saved no file. Check the package's" \
+        (( ${#files[@]} > 0 )) || die "no license text found for ${package} under ${governing_dir}." \
+            "go-licenses classified it but no file is there. Check the package's" \
             "license layout before committing an entry without its text."
-        for lf in "${files[@]}"; do
-            fence="$(fence_for "${lf}")"
-            printf '#### %s\n\n' "$(basename "${lf}")"
+        for license_file in "${files[@]}"; do
+            license_file_name="$(basename "${license_file}")"
+            url="$(location_for "${module}" "${version}" "${relative_license_dir:+${relative_license_dir}/}${license_file_name}")" \
+                || die "${LICENSE_URLS} has no verified URL for ${module}@${version} ${relative_license_dir:+${relative_license_dir}/}${license_file_name}." \
+                       "Run 'make third-party-notices-urls' (needs network) and commit the result."
+            fence="$(fence_for "${license_file}")"
+            printf '#### %s\n\n' "${license_file_name}"
+            printf '<%s>\n\n' "${url}"
             printf '%stext\n' "${fence}"
-            cat "${lf}"
+            cat "${license_file}"
             echo
             printf '%s\n' "${fence}"
             echo
@@ -391,6 +535,7 @@ emit_sections() {
 }
 
 compose_document() {
+    require_url_map
     log "Composing ${OUTPUT}..."
     {
         cat <<'EOF'
@@ -407,6 +552,11 @@ tarball packages. The image additionally bundles `nvidia-ctk`, built from the
 version pinned in `deployments/devel/go.mod`. Go standard library packages are
 excluded; they are covered by the license of the Go distribution itself.
 
+Each dependency is listed with the version redistributed and a link to the
+license file in that version's upstream source. Every link was verified by
+fetching it and comparing its contents against the copy this repository builds
+from, so each one resolves to the same license text reproduced below.
+
 The `k8s-mig-manager` image uses `nvcr.io/nvidia/distroless/go` as a base image.
 All of the OSS packages and source included in this image can be found at
 <https://developer.nvidia.com/w/distroless-oss/index.html>. A statically
@@ -415,27 +565,27 @@ compiled busybox binary is added to the image, which is licensed under GPLv2.
 ## Runtime Dependency Index
 
 EOF
-        emit_index_table "${INDEX_FILE}" module
+        emit_index_table "${INDEX_FILE}" vendor
 
         cat <<'EOF'
 
 ## Bundled Binary Dependency Index
 
 EOF
-        emit_index_table "${TOOLS_INDEX}" module
+        emit_index_table "${TOOLS_INDEX}" modcache
 
         cat <<'EOF'
 
 ## Runtime Dependency License Texts
 
 EOF
-        emit_sections "${INDEX_FILE}" "${LICENSES_DIR}" module
+        emit_sections "${INDEX_FILE}" vendor
 
         cat <<'EOF'
 ## Bundled Binary License Texts
 
 EOF
-        emit_sections "${TOOLS_INDEX}" "${LICENSES_DIR}/.tools" module
+        emit_sections "${TOOLS_INDEX}" modcache
     } > "${OUT_TMP}"
     # mktemp creates 0600; set the mode before, never after, the rename.
     chmod 644 "${OUT_TMP}"
@@ -460,4 +610,8 @@ main() {
     log "Wrote ${OUTPUT} (${runtime_count} runtime rows, ${bundled_count} bundled binary rows)"
 }
 
-main "$@"
+# Sourced by the tests and by hack/verify-license-urls.sh, which reuse these
+# functions without the side effects of a full run.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
